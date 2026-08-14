@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "HiveMind-whatsapp-bridge"
+description = "Bridge WhatsApp (Business Cloud API) to a HiveMind node"
+readme = "readme.md"
+authors = [{ name = "jarbasAI", email = "jarbasai@mailfence.com" }]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dynamic = ["version", "dependencies"]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-asyncio", "httpx"]
+
+[project.urls]
+Homepage = "https://github.com/JarbasHiveMind/hivemind-whatsapp-bridge"
+
+[project.scripts]
+hivemind-whatsapp-bridge = "hivemind_whatsapp_bridge.__main__:main"
+
+[tool.setuptools]
+packages = ["hivemind_whatsapp_bridge"]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { attr = "hivemind_whatsapp_bridge.version.__version__" }
+dependencies = { file = ["requirements.txt"] }

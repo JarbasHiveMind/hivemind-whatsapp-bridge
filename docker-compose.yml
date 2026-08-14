@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  hivemind-whatsapp-bridge:
+    build: .
+    image: hivemind-whatsapp-bridge
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # WhatsApp Business Cloud API credentials (Meta developer console).
+      # Do NOT commit real values here; set them in a .env file or the
+      # deployment's secret store.
+      WHATSAPP_PHONE_NUMBER_ID: "${WHATSAPP_PHONE_NUMBER_ID}"
+      WHATSAPP_ACCESS_TOKEN: "${WHATSAPP_ACCESS_TOKEN}"
+      WHATSAPP_VERIFY_TOKEN: "${WHATSAPP_VERIFY_TOKEN}"
+      # HiveMind hub credentials, see `hivemind-core add-client`.
+      HIVEMIND_ACCESS_KEY: "${HIVEMIND_ACCESS_KEY}"
+      HIVEMIND_PASSWORD: "${HIVEMIND_PASSWORD}"
+      HIVEMIND_HOST: "${HIVEMIND_HOST:-ws://hivemind-core}"
+      HIVEMIND_PORT: "${HIVEMIND_PORT:-5678}"
+      HIVEMIND_SITE_ID: "${HIVEMIND_SITE_ID:-whatsapp}"
+      HIVEMIND_LANG: "${HIVEMIND_LANG:-en-us}"
+    # if hivemind-core runs as another compose service, uncomment:
+    # depends_on:
+    #   - hivemind-core
