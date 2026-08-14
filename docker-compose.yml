@@ -1,13 +1,15 @@
 version: "3.8"
 
 services:
-  hivemind-whatsapp-bridge:
+  # Transport 1: official WhatsApp Business Cloud API. Default, recommended.
+  whatsapp-bridge-cloud:
     build: .
     image: hivemind-whatsapp-bridge
     restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
+      HIVEMIND_TRANSPORT: cloud
       # WhatsApp Business Cloud API credentials (Meta developer console).
       # Do NOT commit real values here; set them in a .env file or the
       # deployment's secret store.
@@ -24,3 +26,32 @@ services:
     # if hivemind-core runs as another compose service, uncomment:
     # depends_on:
     #   - hivemind-core
+
+  # Transport 2: UNOFFICIAL personal-account pairing. Violates WhatsApp's
+  # ToS and can get the paired number banned by Meta -- use a throwaway
+  # number. See readme.md's "Transport 2: personal" section before using
+  # this. Not started by default; run explicitly with
+  # `docker compose up whatsapp-bridge-personal`.
+  whatsapp-bridge-personal:
+    build: .
+    image: hivemind-whatsapp-bridge
+    restart: unless-stopped
+    profiles: ["personal"]
+    volumes:
+      # persists the pairing session so the container doesn't need to
+      # re-pair (and re-show a QR code) on every restart.
+      - whatsapp_session:/app/whatsapp_session
+    environment:
+      HIVEMIND_TRANSPORT: personal
+      HIVEMIND_SESSION_DIR: /app/whatsapp_session
+      HIVEMIND_ACCESS_KEY: "${HIVEMIND_ACCESS_KEY}"
+      HIVEMIND_PASSWORD: "${HIVEMIND_PASSWORD}"
+      HIVEMIND_HOST: "${HIVEMIND_HOST:-ws://hivemind-core}"
+      HIVEMIND_PORT: "${HIVEMIND_PORT:-5678}"
+      HIVEMIND_SITE_ID: "${HIVEMIND_SITE_ID:-whatsapp-personal}"
+      HIVEMIND_LANG: "${HIVEMIND_LANG:-en-us}"
+    # first run needs a QR code scan: `docker compose run --rm
+    # whatsapp-bridge-personal` (interactive) instead of `up -d`.
+
+volumes:
+  whatsapp_session:

@@ -13,6 +13,7 @@ dynamic = ["version", "dependencies"]
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-asyncio", "httpx"]
+personal = ["neonize>=0.4.0", "segno"]
 
 [project.urls]
 Homepage = "https://github.com/JarbasHiveMind/hivemind-whatsapp-bridge"
@@ -21,7 +22,7 @@ Homepage = "https://github.com/JarbasHiveMind/hivemind-whatsapp-bridge"
 hivemind-whatsapp-bridge = "hivemind_whatsapp_bridge.__main__:main"
 
 [tool.setuptools]
-packages = ["hivemind_whatsapp_bridge"]
+packages = ["hivemind_whatsapp_bridge", "hivemind_whatsapp_bridge.transports"]
 include-package-data = true
 
 [tool.setuptools.dynamic]

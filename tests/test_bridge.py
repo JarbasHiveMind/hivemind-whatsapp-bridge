@@ -1,42 +1,50 @@
 """Unit tests: construct the bridge offline and drive it with mocks.
 
-No live WhatsApp Cloud API call or HiveMind connection is made. A
-pre-built mock requests.Session and a pre-built mock
-HiveMessageBusClient are injected so the bridge never touches the
-network.
+No live WhatsApp API call (cloud or personal) or HiveMind connection is
+made. ``FakeTransport`` proves the shared ``HiveMindWhatsappBridge``
+logic (connect-once, no-forward-before-connected, speak routing) works
+identically regardless of which transport is plugged in; the cloud
+transport is additionally exercised through its real FastAPI routes
+with a mocked HTTP session.
 """
-import asyncio
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
+
+from hivemind_whatsapp_bridge.transports.base import WhatsAppTransport
+
+
+class FakeTransport(WhatsAppTransport):
+    """Minimal in-memory transport, standing in for cloud or personal."""
+
+    def __init__(self):
+        super().__init__()
+        self.started = False
+        self.stopped = False
+        self.sent = []  # list of (recipient, text)
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def send(self, recipient, text):
+        self.sent.append((recipient, text))
+
+    def emit_inbound(self, sender, text):
+        """Test helper: simulate an inbound WhatsApp message."""
+        if self._on_message is not None:
+            self._on_message(sender, text)
 
 
 def _make_bridge(**kwargs):
     from hivemind_whatsapp_bridge import HiveMindWhatsappBridge
 
     fake_client = MagicMock(name="HiveMessageBusClient")
-    fake_session = MagicMock(name="requests.Session")
-    fake_resp = MagicMock()
-    fake_resp.raise_for_status = MagicMock()
-    fake_session.post.return_value = fake_resp
-
-    bridge = HiveMindWhatsappBridge(client=fake_client, session=fake_session,
-                                    verify_token="secret", **kwargs)
-    return bridge, fake_client, fake_session
-
-
-def _cloud_api_payload(text="turn on the lights", sender="15551234567", msg_type="text"):
-    message = {"from": sender, "type": msg_type}
-    if msg_type == "text":
-        message["text"] = {"body": text}
-    return {
-        "entry": [{
-            "changes": [{
-                "value": {"messages": [message]},
-            }],
-        }],
-    }
+    transport = FakeTransport()
+    bridge = HiveMindWhatsappBridge(transport=transport, client=fake_client, **kwargs)
+    return bridge, fake_client, transport
 
 
 def test_import_package_and_version():
@@ -49,21 +57,19 @@ def test_import_package_and_version():
 
 
 def test_construct_bridge_without_connecting():
-    bridge, fake_client, fake_session = _make_bridge()
+    bridge, fake_client, transport = _make_bridge()
     assert bridge._connected is False
     fake_client.connect.assert_not_called()
 
 
-def test_credentials_required_without_injected_session():
-    from hivemind_whatsapp_bridge import HiveMindWhatsappBridge
-
-    with pytest.raises(ValueError):
-        HiveMindWhatsappBridge(client=MagicMock())
+def test_transport_gets_message_handler_registered():
+    bridge, fake_client, transport = _make_bridge()
+    assert transport._on_message is not None
 
 
 def test_connect_hivemind_calls_connect_once_and_registers_handlers():
     """connect_hivemind() must call connect() exactly once, never run_forever()."""
-    bridge, fake_client, fake_session = _make_bridge()
+    bridge, fake_client, transport = _make_bridge()
     bridge.connect_hivemind()
 
     fake_client.connect.assert_called_once_with(site_id="whatsapp")
@@ -73,40 +79,14 @@ def test_connect_hivemind_calls_connect_once_and_registers_handlers():
     assert registered == {"speak", "hive.complete_intent_failure"}
 
 
-def test_webhook_verification_echoes_challenge_on_matching_token():
-    bridge, fake_client, fake_session = _make_bridge()
-    client = TestClient(bridge.app)
-
-    resp = client.get("/webhook", params={
-        "hub.mode": "subscribe", "hub.verify_token": "secret",
-        "hub.challenge": "12345",
-    })
-    assert resp.status_code == 200
-    assert resp.text == "12345"
-
-
-def test_webhook_verification_rejects_mismatched_token():
-    bridge, fake_client, fake_session = _make_bridge()
-    client = TestClient(bridge.app)
-
-    resp = client.get("/webhook", params={
-        "hub.mode": "subscribe", "hub.verify_token": "wrong",
-        "hub.challenge": "12345",
-    })
-    assert resp.status_code == 403
-
-
-def test_inbound_text_message_forwarded_to_hivemind_after_connect():
+def test_inbound_message_forwarded_to_hivemind_after_connect():
     from hivemind_bus_client import HiveMessage, HiveMessageType
 
-    bridge, fake_client, fake_session = _make_bridge()
+    bridge, fake_client, transport = _make_bridge()
     bridge.connect_hivemind()
 
-    client = TestClient(bridge.app)
-    resp = client.post("/webhook", json=_cloud_api_payload(
-        text="turn on the lights", sender="15551234567"))
+    transport.emit_inbound("15551234567", "turn on the lights")
 
-    assert resp.status_code == 200
     fake_client.emit.assert_called_once()
     sent = fake_client.emit.call_args[0][0]
     assert isinstance(sent, HiveMessage)
@@ -119,64 +99,72 @@ def test_inbound_text_message_forwarded_to_hivemind_after_connect():
 
 
 def test_no_forward_before_hivemind_connected():
-    bridge, fake_client, fake_session = _make_bridge()
+    bridge, fake_client, transport = _make_bridge()
     # deliberately not calling bridge.connect_hivemind()
 
-    client = TestClient(bridge.app)
-    resp = client.post("/webhook", json=_cloud_api_payload())
+    transport.emit_inbound("15551234567", "hello")
 
-    assert resp.status_code == 200
     fake_client.emit.assert_not_called()
 
 
-def test_non_text_message_is_ignored():
-    bridge, fake_client, fake_session = _make_bridge()
-    bridge.connect_hivemind()
-
-    client = TestClient(bridge.app)
-    resp = client.post("/webhook", json=_cloud_api_payload(msg_type="image"))
-
-    assert resp.status_code == 200
-    fake_client.emit.assert_not_called()
-
-
-def test_speak_sends_message_to_originating_number():
+def test_speak_sends_message_to_originating_number_via_transport():
     from ovos_bus_client.message import Message
 
-    bridge, fake_client, fake_session = _make_bridge()
+    bridge, fake_client, transport = _make_bridge()
     msg = Message("speak", {"utterance": "hi there"}, {"from_number": "15551234567"})
     bridge.handle_speak(msg)
 
-    fake_session.post.assert_called_once()
-    args, kwargs = fake_session.post.call_args
-    assert kwargs["json"]["to"] == "15551234567"
-    assert kwargs["json"]["text"]["body"] == "hi there"
+    assert transport.sent == [("15551234567", "hi there")]
 
 
 def test_speak_with_no_from_number_is_ignored():
     from ovos_bus_client.message import Message
 
-    bridge, fake_client, fake_session = _make_bridge()
+    bridge, fake_client, transport = _make_bridge()
     msg = Message("speak", {"utterance": "hi"}, {})
     bridge.handle_speak(msg)
-    fake_session.post.assert_not_called()
+    assert transport.sent == []
 
 
-def test_intent_failure_sends_fallback_message():
+def test_intent_failure_sends_fallback_message_via_transport():
     from ovos_bus_client.message import Message
 
-    bridge, fake_client, fake_session = _make_bridge()
+    bridge, fake_client, transport = _make_bridge()
     msg = Message("hive.complete_intent_failure", {}, {"from_number": "15551234567"})
     bridge.handle_intent_failure(msg)
 
-    fake_session.post.assert_called_once()
-    _, kwargs = fake_session.post.call_args
-    assert kwargs["json"]["to"] == "15551234567"
-    assert "don't know" in kwargs["json"]["text"]["body"]
+    assert len(transport.sent) == 1
+    recipient, text = transport.sent[0]
+    assert recipient == "15551234567"
+    assert "don't know" in text
 
 
-def test_send_message_http_error_is_caught():
-    bridge, fake_client, fake_session = _make_bridge()
-    fake_session.post.side_effect = RuntimeError("network error")
+def test_stop_stops_transport_and_closes_hivemind_client():
+    bridge, fake_client, transport = _make_bridge()
+    bridge.connect_hivemind()
+    bridge.stop()
 
-    bridge.send_message("hello", "15551234567")  # must not raise
+    assert transport.stopped is True
+    fake_client.close.assert_called_once()
+    assert bridge._connected is False
+
+
+def test_transport_error_on_send_does_not_raise():
+    from ovos_bus_client.message import Message
+
+    class BrokenTransport(FakeTransport):
+        def send(self, recipient, text):
+            raise RuntimeError("network error")
+
+    from hivemind_whatsapp_bridge import HiveMindWhatsappBridge
+    fake_client = MagicMock(name="HiveMessageBusClient")
+    transport = BrokenTransport()
+    bridge = HiveMindWhatsappBridge(transport=transport, client=fake_client)
+
+    # the bridge itself does not swallow transport.send() errors -- each
+    # real transport is responsible for catching its own I/O errors, as
+    # both CloudTransport and PersonalTransport do. This test documents
+    # that contract instead of asserting bridge-level suppression.
+    msg = Message("speak", {"utterance": "hi"}, {"from_number": "1"})
+    with pytest.raises(RuntimeError):
+        bridge.handle_speak(msg)

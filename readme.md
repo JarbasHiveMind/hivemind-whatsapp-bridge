@@ -1,20 +1,39 @@
 # HiveMind WhatsApp Bridge
 
-This bridges WhatsApp to a HiveMind node using Meta's **WhatsApp
-Business Cloud API**. A HiveMind bridge is a satellite whose input and
-output are a chat platform instead of a microphone: WhatsApp messages
-become HiveMind utterances, and the hub's spoken replies are sent back
-as WhatsApp messages to the same conversation.
+This bridges WhatsApp to a HiveMind node. A HiveMind bridge is a
+satellite whose input and output are a chat platform instead of a
+microphone: WhatsApp messages become HiveMind utterances, and the hub's
+spoken replies are sent back as WhatsApp messages to the same
+conversation.
 
-Read this section before anything else: WhatsApp has no clean official
-API for a *personal* WhatsApp account. There are two real options, and
-this repository is honest about which one it implements.
+There is no single official API for WhatsApp, so this bridge supports
+**two interchangeable transports**, chosen with `--transport`:
 
-## The two paths, and why only one is implemented here
+| | `cloud` (default) | `personal` |
+|---|---|---|
+| What it is | Meta's official WhatsApp Business Cloud API | Pairs to a real personal number via the unofficial, reverse-engineered multi-device protocol (`neonize`/`whatsmeow`) |
+| Status | Official, ToS-compliant | **Unofficial. Violates WhatsApp's Terms of Service.** |
+| Risk | None beyond normal API usage | Meta can and does ban paired numbers, without warning |
+| Setup | Meta developer app + webhook | Scan a QR code once, session persists |
 
-**Option A — WhatsApp Business Cloud API (implemented here).** Official,
-run by Meta, webhook-based — the same shape as the Twilio bridge in
-this org. What it needs:
+Both transports feed the exact same HiveMind-side logic (forward text
+in, `speak` replies out, session keyed by sender) through a small
+`WhatsAppTransport` interface
+(`hivemind_whatsapp_bridge/transports/base.py`). Adding a third
+transport (e.g. a Baileys sidecar) means implementing that interface,
+nothing else changes.
+
+**Use `cloud` unless you have a specific reason not to.** `personal` is
+documented below as a clearly-labeled, at-your-own-risk alternative for
+people who want to bridge their own personal number and have accepted
+the risk.
+
+---
+
+## Transport 1: `cloud` (WhatsApp Business Cloud API)
+
+Official, run by Meta, webhook-based — the same shape as the Twilio
+bridge in this org. What it needs:
 
 - A Meta developer account and a Meta Business app with the WhatsApp
   product added.
@@ -22,28 +41,7 @@ this org. What it needs:
   during development; a real number for production).
 - A publicly reachable webhook URL (this bridge exposes one).
 
-This is the path this bridge is built against. It is clean, documented,
-and does not risk your personal WhatsApp account.
-
-**Option B — a `whatsmeow`/Baileys gateway paired to a personal
-number via QR code.** Community-built, talks to WhatsApp's private
-client protocol rather than an API Meta publishes. It technically works
-today and is popular for personal-use bots, but it is against
-WhatsApp's Terms of Service and Meta does ban numbers it detects doing
-this, without warning and without appeal in many reported cases. This
-repository does **not** implement this path and will not pretend a
-QR-paired personal bridge is a supported, safe feature. If you still
-want to go this route: run a `whatsmeow` (Go) or `Baileys`
-(Node) gateway yourself, which exposes its own REST/webhook API once
-paired, and adapt `hivemind_whatsapp_bridge/__init__.py`'s webhook
-handler and `send_message()` to call that gateway's API instead of the
-Graph API. The HiveMind-side logic (forward text in, `speak` replies
-out, session keyed by sender) does not change; only the transport does.
-
-This bridge has not been exercised against live Meta traffic or a real
-HiveMind hub — only unit-tested with both sides mocked.
-
-## Setting up the Cloud API (Option A) from scratch
+### Setting it up from scratch
 
 1. Create a Meta developer account at
    [developers.facebook.com](https://developers.facebook.com).
@@ -62,17 +60,84 @@ HiveMind hub — only unit-tested with both sides mocked.
    number list). This restriction goes away once the app and a
    production number complete Meta's business verification.
 
-## Pointing the Cloud API at this bridge
+### Pointing the Cloud API at this bridge
 
-1. Run this bridge (see below) so it is listening, e.g. at
-   `https://your-public-host/webhook`. Use a public server or a tunnel
-   (e.g. `ngrok http 8080`) while testing locally.
+1. Run this bridge (see "Running the bridge" below) so it is listening,
+   e.g. at `https://your-public-host/webhook`. Use a public server or a
+   tunnel (e.g. `ngrok http 8080`) while testing locally.
 2. In the app dashboard: WhatsApp → Configuration → Webhook → Edit.
    Set the Callback URL to `https://your-public-host/webhook` and the
    Verify Token to the same string you pass this bridge as
    `--whatsapp-verify-token`. Meta calls the URL once with a challenge
    to confirm you control it; this bridge answers that automatically.
 3. Subscribe the webhook to the `messages` field.
+
+### What it does, precisely
+
+- Runs a FastAPI web server exposing `GET /webhook` (Meta's
+  verification handshake) and `POST /webhook` (the actual message
+  events), matching the Cloud API's webhook contract.
+- Only forwards `text` messages; images, reactions, status updates and
+  every other message type in the Cloud API payload are ignored.
+- Sends `speak` replies (and a fixed fallback line on
+  `hive.complete_intent_failure`) back to the originating number via a
+  plain HTTP POST to the Graph API's `/messages` endpoint.
+
+---
+
+## Transport 2: `personal` — read this before using it
+
+This transport pairs to a real, personal WhatsApp number as a linked
+device (WhatsApp Web/Desktop-style pairing), using the reverse-engineered
+multi-device protocol via [`neonize`](https://github.com/krypton-byte/neonize)
+(Python bindings over `whatsmeow`, the Go client also behind Baileys-class
+tooling).
+
+**State it plainly:**
+
+- This is **unofficial**. It does not use any API published or
+  supported by Meta.
+- It **violates WhatsApp's Terms of Service**.
+- Meta actively detects unofficial clients and **can, and does, ban the
+  paired number** — permanently, without appeal, sometimes fast.
+- **Use a throwaway/secondary number you can afford to lose.** Do not
+  pair your primary personal number.
+- This is a personal-use, per-conversation assistant bridge, the same
+  shape as the `cloud` transport: it answers messages sent to the
+  paired account, one chat at a time. It is not, and must not be turned
+  into, a bulk-send or scraping tool. Group chats and the account's own
+  outgoing messages are ignored on purpose.
+- This is the same category of tool as `mautrix-whatsapp`,
+  `go-whatsapp` and Baileys-based bridges: personal interoperability
+  tooling, not a spam platform. That does not change the ToS or ban
+  risk above — it is still the deployer's risk to accept.
+
+### Pairing
+
+1. Install the extra: `pip install .[personal]` (installs `neonize` and
+   `segno`).
+2. Run the bridge with `--transport personal --session-dir ./whatsapp_session`.
+3. On first run, a QR code is printed to the terminal and also written
+   as a PNG to `<session-dir>/pairing_qr.png`. On your phone: WhatsApp →
+   Linked Devices → Link a Device → scan it.
+4. Once paired, the session (pairing keys) is persisted to a sqlite
+   database inside `--session-dir`. Keep that directory between
+   restarts — deleting it means re-pairing (and issuing a new QR).
+
+### What it does, precisely
+
+- Connects via `neonize.client.NewClient`, using `--session-dir` as its
+  sqlite session store.
+- Registers handlers for the QR pairing event, the `Connected` event,
+  and inbound `Message` events.
+- Ignores messages from group chats and messages the account itself
+  sent (`IsGroup` / `IsFromMe`), keeping the bridge a 1:1 assistant, not
+  a broadcast surface.
+- Extracts plain text from inbound messages (`neonize.utils.extract_text`)
+  and forwards it the same way the `cloud` transport does.
+- Sends `speak` replies back via `NewClient.send_message()`.
+
+---
 
 ## Registering the bridge on the hub
 
@@ -103,6 +168,8 @@ whitelisted.
 
 ## Running the bridge
 
+Cloud (default):
+
 ```bash
 pip install .
 hivemind-whatsapp-bridge \
@@ -116,7 +183,17 @@ hivemind-whatsapp-bridge \
 This starts a web server (default `0.0.0.0:8080`, override with
 `--web-host` / `--web-port`) that Meta's webhook needs to reach.
 
-Useful flags:
+Personal (unofficial, read the section above first):
+
+```bash
+pip install .[personal]
+hivemind-whatsapp-bridge \
+  --transport personal --session-dir ./whatsapp_session \
+  --access-key <key> --password <password> \
+  --host ws://127.0.0.1 --hivemind-port 5678
+```
+
+Useful flags (both transports):
 
 - `--site-id`: this bridge's HiveMind site id. If you run more than one
   bridge on the same host, give each a distinct site id — otherwise
@@ -130,6 +207,8 @@ Run `hivemind-whatsapp-bridge --help` for the full list.
 
 ## Docker
 
+Cloud:
+
 ```bash
 docker build -t hivemind-whatsapp-bridge .
 docker run --rm -p 8080:8080 \
@@ -142,38 +221,37 @@ docker run --rm -p 8080:8080 \
   hivemind-whatsapp-bridge
 ```
 
-or via `docker-compose.yml` — copy it, fill in the environment section,
-and `docker compose up`.
+Personal (mount a volume for `--session-dir` so pairing survives
+container restarts, and run once interactively to scan the QR code):
 
-## What this bridge does, precisely
+```bash
+docker build -t hivemind-whatsapp-bridge .
+docker run --rm -it -v $(pwd)/whatsapp_session:/app/whatsapp_session \
+  -e HIVEMIND_TRANSPORT=personal \
+  -e HIVEMIND_SESSION_DIR=/app/whatsapp_session \
+  -e HIVEMIND_ACCESS_KEY=... \
+  -e HIVEMIND_PASSWORD=... \
+  -e HIVEMIND_HOST=ws://hivemind-core \
+  hivemind-whatsapp-bridge
+```
 
-- Runs a FastAPI web server exposing `GET /webhook` (Meta's
-  verification handshake) and `POST /webhook` (the actual message
-  events), matching the Cloud API's webhook contract.
-- Connects to the HiveMind hub with
-  `hivemind_bus_client.HiveMessageBusClient`.
-- Only forwards `text` messages; images, reactions, status updates and
-  every other message type in the Cloud API payload are ignored.
-- Drops anything received before the HiveMind handshake has completed —
-  forwarding earlier would get the connection killed by the hub instead
-  of just failing the one message.
-- Forwards each remaining message as a `recognizer_loop:utterance` bus
-  message, carrying the sender's WhatsApp number in the message context
-  so the hub's `speak` reply can be routed back to the right
-  conversation.
-- Sends `speak` replies (and a fixed fallback line on
-  `hive.complete_intent_failure`) back to the originating number via a
-  plain HTTP POST to the Graph API's `/messages` endpoint.
+or via `docker-compose.yml` — copy it, fill in the environment section
+for the transport you're using (`whatsapp-bridge-cloud` or
+`whatsapp-bridge-personal`), and `docker compose up <service>`.
 
 ## Testing
 
 ```bash
-pip install -e .[test]
+pip install -e .[test,personal]
 pytest tests/
 ```
 
-The test suite mocks both the outbound HTTP session and the HiveMind
-`HiveMessageBusClient`, so it runs without a live Meta app or a live
-hub. It has not been exercised against real WhatsApp traffic or a real
-HiveMind hub — that needs an actual Meta developer app and phone
-number, which this repository does not have.
+The test suite mocks the outbound HTTP session, the HiveMind
+`HiveMessageBusClient`, and a fake `WhatsAppTransport`, so it runs
+without a live Meta app, a live personal WhatsApp pairing, or a live
+hub. It proves the shared bridge logic (connect-once, no-forward-before-
+connected, `speak` routing) against both transport shapes, and each
+transport's own request/response handling in isolation. It has not been
+exercised against real WhatsApp traffic (Cloud API or personal) or a
+real HiveMind hub — that needs an actual Meta developer app / a phone to
+pair, and a running hub, none of which this repository has.
